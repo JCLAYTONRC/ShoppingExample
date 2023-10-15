@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Clayton</string>
+    <string name="product_create">Crear</string>
+    <string name="product_loading">Preparando todo...</string>
+</resources>
