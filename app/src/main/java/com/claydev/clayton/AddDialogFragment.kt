@@ -1,30 +1,58 @@
 package com.claydev.clayton
 
+import android.app.Activity
 import android.app.Dialog
 import android.content.DialogInterface
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.provider.MediaStore
+import android.util.Log
 import android.view.LayoutInflater
+import android.view.View
 import android.widget.Button
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.DialogFragment
+import com.bumptech.glide.Glide
+import com.bumptech.glide.load.engine.DiskCacheStrategy
 import com.claydev.clayton.databinding.FragmentDialogAddBinding
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.storage.FirebaseStorage
 
 class AddDialogFragment : DialogFragment(), DialogInterface.OnShowListener {
 
-    private var bindig: FragmentDialogAddBinding? = null
+    private var binding: FragmentDialogAddBinding? = null
 
     private var positiveButton: Button? = null
     private var negativeButton: Button? = null
 
     private var product: Product? = null
 
+    private var photoSelectedUri: Uri? = null
+
+    private val resultLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()){
+        if(it.resultCode == Activity.RESULT_OK){
+            photoSelectedUri = it.data?.data
+
+          //  binding?.imgProductPreview?.setImageURI(photoSelectedUri)
+            binding?.let {
+                Glide.with(this)
+                    .load(photoSelectedUri)
+                    .diskCacheStrategy(DiskCacheStrategy.ALL)
+                    .centerCrop()
+                    .into(it.imgProductPreview)
+            }
+
+        }
+    }
+
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
         activity?.let { activity ->
-            bindig = FragmentDialogAddBinding.inflate(LayoutInflater.from(context))
+            binding = FragmentDialogAddBinding.inflate(LayoutInflater.from(context))
 
-            bindig?.let {
+            binding?.let {
                 val builder = AlertDialog.Builder(activity)
                     .setTitle("Agregar producto")
                     .setPositiveButton("Agregar", null)
@@ -41,6 +69,7 @@ class AddDialogFragment : DialogFragment(), DialogInterface.OnShowListener {
     }
     override fun onShow(dialogInterface: DialogInterface?) {
         initProduct()
+        configButtons()
 
         val dialog = dialog as? AlertDialog
         dialog?.let {
@@ -48,25 +77,33 @@ class AddDialogFragment : DialogFragment(), DialogInterface.OnShowListener {
             negativeButton = it.getButton(Dialog.BUTTON_NEGATIVE)
 
             positiveButton?.setOnClickListener {
-                bindig?.let {
+                binding?.let {
                     enableUI(false)
-                    if(product == null){
-                        val product = Product(name = it.etName.text.toString().trim(),
-                            desciption = it.etDescription.text.toString().trim(),
-                            quantity = it.etQuantity.text.toString().toInt(),
-                            price = it.etPrice.text.toString().toDouble())
 
-                        save(product)
-                    } else {
-                        product?.apply {
-                            name =  it.etName.text.toString().trim()
-                            desciption = it.etDescription.text.toString().trim()
-                            quantity = it.etQuantity.text.toString().toInt()
-                            price = it.etPrice.text.toString().toDouble()
+                    uploadImage(product?.id){ eventPost ->
+                        if(eventPost.isSuccess){
+                            if(product == null){
+                                val product = Product(name = it.etName.text.toString().trim(),
+                                    desciption = it.etDescription.text.toString().trim(),
+                                    imgUrl = eventPost.photoUrl,
+                                    quantity = it.etQuantity.text.toString().toInt(),
+                                    price = it.etPrice.text.toString().toDouble())
 
-                            update(this)
+                                save(product, eventPost.documentId!!)
+                            } else {
+                                product?.apply {
+                                    name =  it.etName.text.toString().trim()
+                                    desciption = it.etDescription.text.toString().trim()
+                                    imgUrl = eventPost.photoUrl
+                                    quantity = it.etQuantity.text.toString().toInt()
+                                    price = it.etPrice.text.toString().toDouble()
+
+                                    update(this)
+                                }
+                            }
                         }
                     }
+
 
                 }
             }
@@ -80,27 +117,87 @@ class AddDialogFragment : DialogFragment(), DialogInterface.OnShowListener {
     private fun initProduct() {
         product = (activity as? MainAux)?.getProductSelected()
         product?.let {  product ->
-            bindig?.let {
+            binding?.let {
                 it.etName.setText(product.name)
                 it.etDescription.setText(product.desciption)
                 it.etQuantity.setText(product.quantity.toString())
                 it.etPrice.setText(product.price.toString())
+
+                Glide.with(this)
+                    .load(product.imgUrl)
+                    .diskCacheStrategy(DiskCacheStrategy.ALL)
+                    .centerCrop()
+                    .into(it.imgProductPreview)
             }
         }
     }
 
-    private fun save(product: Product){
+    private fun configButtons(){
+        binding?.let {
+            it.ibProduct.setOnClickListener {
+                openGallery()
+            }
+        }
+    }
+
+    private fun openGallery() {
+        val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+        resultLauncher.launch(intent)
+    }
+
+    private fun uploadImage(productId: String?, callback: (EventPost) -> Unit){
+        val eventPost = EventPost()
+        eventPost.documentId = productId?: FirebaseFirestore.getInstance()
+            .collection(Constants.COLL_PRODUCTS).document().id
+        val storageRef = FirebaseStorage.getInstance().reference.child(Constants.PATH_PRODUCT_IMAGES)
+
+        photoSelectedUri?.let { uri ->
+            binding?.let { binding ->
+                binding.progressBar.visibility = View.VISIBLE
+
+                val photoRef = storageRef.child(eventPost.documentId!!)
+
+                photoRef.putFile(uri)
+                    .addOnProgressListener {
+                        val progress = (100 * it.bytesTransferred / it.totalByteCount).toInt()
+                        it.run{
+                            binding.progressBar.progress = progress
+                            binding.tvProgress.text = String.format("%s%%", progress)
+                        }
+                    }
+                    .addOnSuccessListener {
+                        it.storage.downloadUrl.addOnSuccessListener { downloadUrl ->
+                            Log.i("URL", downloadUrl.toString())
+                            eventPost.isSuccess = true
+                            eventPost.photoUrl = downloadUrl.toString()
+                            callback(eventPost)
+                        }
+                    }
+                
+                    .addOnFailureListener{
+                        Toast.makeText(activity, "Error al subir imagen. ", Toast.LENGTH_SHORT).show()
+                        enableUI(true)
+                        eventPost.isSuccess = false
+                        callback(eventPost)
+                    }
+            }
+        }
+    }
+    private fun save(product: Product, documentId: String){
         val db = FirebaseFirestore.getInstance()
         db.collection(Constants.COLL_PRODUCTS)
-            .add(product)
+            .document(documentId)
+            .set(product)
+            //.add(product)
             .addOnSuccessListener {
-                Toast.makeText(activity, "Producto a;adido. ", Toast.LENGTH_SHORT).show()
+                Toast.makeText(activity, "Producto añadido. ", Toast.LENGTH_SHORT).show()
             }
             .addOnFailureListener {
                 Toast.makeText(activity, "Error al insertar. ", Toast.LENGTH_SHORT).show()
             }
             .addOnCompleteListener {
                 enableUI(true)
+                binding?.progressBar?.visibility = View.INVISIBLE
                 dismiss()
             }
     }
@@ -119,6 +216,8 @@ class AddDialogFragment : DialogFragment(), DialogInterface.OnShowListener {
                 }
                 .addOnCompleteListener {
                     enableUI(true)
+                    binding?.progressBar?.visibility = View.INVISIBLE
+
                     dismiss()
                 }
         }
@@ -127,7 +226,7 @@ class AddDialogFragment : DialogFragment(), DialogInterface.OnShowListener {
     private fun enableUI(enable: Boolean){
         positiveButton?.isEnabled = enable
         negativeButton?.isEnabled = enable
-        bindig?.let {
+        binding?.let {
             with(it){
                 etName.isEnabled = enable
                 etDescription.isEnabled = enable
@@ -138,7 +237,7 @@ class AddDialogFragment : DialogFragment(), DialogInterface.OnShowListener {
     }
     override fun onDestroyView() {
         super.onDestroyView()
-        bindig = null
+        binding = null
     }
 
 }
